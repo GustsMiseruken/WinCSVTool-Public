@@ -1,0 +1,5 @@
+<Project>
+  <ItemGroup Condition="'$(MSBuildProjectName)' == 'WinCSVTool' Or '$(MSBuildProjectName)' == 'WinCSVTool.Cli'">
+    <Content Include="$(MSBuildThisFileDirectory)data\ip\**\*" Link="data\ip\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+</Project>

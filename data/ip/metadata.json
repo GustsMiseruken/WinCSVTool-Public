@@ -1,0 +1,17 @@
+{
+  "SnapshotDate": "2026-10-01",
+  "Source": "DB-IP Lite / https://db-ip.com/db/lite.php; special-use classification: IANA / https://www.iana.org/assignments/iana-ipv4-special-registry/ / https://www.iana.org/assignments/iana-ipv6-special-registry/",
+  "CountrySource": "https://db-ip.com/db/download/ip-to-country-lite",
+  "AsnSource": "https://db-ip.com/db/download/ip-to-asn-lite",
+  "License": "CC BY 4.0 / https://creativecommons.org/licenses/by/4.0/",
+  "Attribution": "IP Geolocation and ASN data by DB-IP.com",
+  "CountryFile": "dbip-country-lite-2026-10.mmdb",
+  "AsnFile": "dbip-asn-lite-2026-10.mmdb",
+  "AsnIndexFile": "asn-organizations-2026-10.db",
+  "CountryBuildUtc": "2026-10-01T01:36:12.0000000Z",
+  "AsnBuildUtc": "2026-10-01T01:41:36.0000000Z",
+  "CountrySha256": "DBD70CCFA2A13627EAF4913D19920A1A229F1B3C5439AC01C509995B6364202A",
+  "AsnSha256": "4384BFCFB594391BC4E0AB37751F44661EAF7CADBEEE28A90A6B82DC935FEC4C",
+  "AsnIndexSha256": "34021C50BB995B7C72DE641185D83761C416027C3FD476EAD1A388038CF81A2D",
+  "AsnOrganizations": 82135
+}
