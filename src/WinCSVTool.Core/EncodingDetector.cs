@@ -25,10 +25,13 @@ public static class EncodingDetector
 
     public static string Detect(string path)
     {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var sample = new byte[(int)Math.Min(64 * 1024, stream.Length)];
-        var length = stream.Read(sample, 0, sample.Length);
-        var bytes = sample.AsSpan(0, length);
+        using var input = CompressedText.OpenRead(path);
+        return input.EncodingName;
+    }
+
+    public static string Detect(ReadOnlySpan<byte> bytes, bool complete)
+    {
+        var length = bytes.Length;
         if (bytes.StartsWith(new byte[] { 0xef, 0xbb, 0xbf })) return "utf-8";
         if (bytes.StartsWith(new byte[] { 0xff, 0xfe })) return "utf-16le";
         if (bytes.StartsWith(new byte[] { 0xfe, 0xff })) return "utf-16be";
@@ -43,9 +46,9 @@ public static class EncodingDetector
             if (oddZeros > length / 8 && evenZeros < oddZeros / 4) return "utf-16le";
             if (evenZeros > length / 8 && oddZeros < evenZeros / 4) return "utf-16be";
         }
-        if (CanDecode(bytes, Resolve("utf-8"), length == stream.Length)) return "utf-8";
-        if (CanDecode(bytes, Resolve("cp932"), length == stream.Length)) return "cp932";
-        if (CanDecode(bytes, Resolve("euc-jp"), length == stream.Length)) return "euc-jp";
+        if (CanDecode(bytes, Resolve("utf-8"), complete)) return "utf-8";
+        if (CanDecode(bytes, Resolve("cp932"), complete)) return "cp932";
+        if (CanDecode(bytes, Resolve("euc-jp"), complete)) return "euc-jp";
         throw new DecoderFallbackException("文字コードを判定できません。文字コードを指定して開いてください。");
     }
 

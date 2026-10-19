@@ -83,19 +83,15 @@ public sealed partial class Workspace : IDisposable
         lock (gate) EnsureDocumentCapacity(1);
         CsvCodec.ValidateDelimiter(options.Delimiter);
         path = Path.GetFullPath(path);
-        var encodingName = options.EncodingName.Equals("auto", StringComparison.OrdinalIgnoreCase) ? EncodingDetector.Detect(path) : options.EncodingName;
-        var encoding = EncodingDetector.Resolve(encodingName);
-        using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.SequentialScan);
-        SkipMatchingPreamble(file, encoding);
-        using var reader = new StreamReader(file, encoding, false, 64 * 1024, true);
-        using var records = CsvCodec.Read(reader, options.Delimiter, token).GetEnumerator();
-        progress?.Report(new ImportProgress(0, 0, file.Length));
+        using var text = CompressedText.OpenRead(path, options.EncodingName, token);
+        using var records = CsvCodec.Read(text.Reader, options.Delimiter, token).GetEnumerator();
+        progress?.Report(new ImportProgress(0, 0, text.TotalBytes));
         token.ThrowIfCancellationRequested();
         var first = records.MoveNext() ? records.Current : null;
         var headers = first is null ? new[] { "Column1" } : options.HasHeader ? first : Enumerable.Range(1, first.Length).Select(i => $"Column{i}").ToArray();
         var document = NewDocument(Path.GetFileName(path), headers);
         document.SourcePath = path;
-        document.EncodingName = encoding.WebName;
+        document.EncodingName = text.EncodingName;
         document.HasHeader = options.HasHeader;
         document.Delimiter = options.Delimiter;
         lock (gate)
@@ -119,13 +115,13 @@ public sealed partial class Workspace : IDisposable
                 document.RowCount++;
                 if ((document.RowCount & 8191) == 0)
                 {
-                    progress?.Report(new ImportProgress(document.RowCount, file.Position, file.Length));
+                    progress?.Report(new ImportProgress(document.RowCount, text.BytesRead, text.TotalBytes));
                     token.ThrowIfCancellationRequested();
                 }
             }
             if (first is not null && !options.HasHeader) AddRecord(first);
             while (records.MoveNext()) AddRecord(records.Current);
-            progress?.Report(new ImportProgress(document.RowCount, file.Length, file.Length));
+            progress?.Report(new ImportProgress(document.RowCount, text.TotalBytes, text.TotalBytes));
             token.ThrowIfCancellationRequested();
             var map = BuildMap(connection, transaction, document, new ViewSpec(), token);
             token.ThrowIfCancellationRequested();
@@ -390,11 +386,15 @@ public sealed partial class Workspace : IDisposable
     }
 
     public void Export(CsvDocument document, string path, CsvOptions options, ViewSpec? view = null, CancellationToken token = default)
-        => ExportRows(document, path, options, EnumerateRows(document, view, token), view is null && !options.EscapeSpreadsheetFormulas, token);
+    {
+        ValidateExportDestination(path);
+        ExportRows(document, path, options, EnumerateRows(document, view, token), view is null && !options.EscapeSpreadsheetFormulas, token);
+    }
 
     public void Export(CsvDocument document, string path, CsvOptions options, RowScope scope, CancellationToken token = default)
     {
         ValidateScope(document, scope);
+        ValidateExportDestination(path);
         ExportRows(document, path, options, EnumerateRows(document, scope, token), false, token);
     }
 
@@ -404,9 +404,11 @@ public sealed partial class Workspace : IDisposable
         CsvCodec.ValidateDelimiter(options.Delimiter);
         path = Path.GetFullPath(path);
         var encodingName = options.EncodingName.Equals("auto", StringComparison.OrdinalIgnoreCase) ? document.EncodingName : options.EncodingName;
+        ValidateLogDestination(document, path);
         var encoding = EncodingDetector.Resolve(encodingName, options.WriteBom);
         using var output = new AtomicFile(path);
-        using (var writer = new StreamWriter(output.Stream, encoding, 64 * 1024, true))
+        using (var compressed = CompressedText.OpenWrite(output.Stream, path))
+        using (var writer = new StreamWriter(compressed, encoding, 64 * 1024, true))
         {
             if (options.HasHeader) CsvCodec.WriteRecord(writer, document.Columns.Select(x => x.HeaderName), options.Delimiter, options.EscapeSpreadsheetFormulas);
             foreach (var row in rows) CsvCodec.WriteRecord(writer, row.Values, options.Delimiter, options.EscapeSpreadsheetFormulas);

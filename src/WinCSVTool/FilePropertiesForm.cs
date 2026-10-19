@@ -37,10 +37,12 @@ internal sealed class FilePropertiesForm : Form
             table.Controls.Add(content, 1, row);
             FitHeight();
         }
-        var source = GetFileInfo(document.SourcePath);
+        var sourcePath = document.SourcePath ?? document.ImportSourcePath;
+        var source = GetFileInfo(sourcePath);
         Property("名前", document.DisplayName);
-        Property("元ファイルの場所", document.SourcePath ?? "未保存の新規CSV");
-        Property("元ファイルの状態", source is null ? document.SourcePath is null ? "新規CSV（保存先未設定）" : "見つからない、または参照できません" : "存在します");
+        Property("元ファイルの場所", sourcePath ?? "未保存の新規CSV");
+        if (document.ImportSourcePath is { } logSource) Property("取り込み元のログ", logSource + "（CSV保存で上書きしません）");
+        Property("元ファイルの状態", source is null ? sourcePath is null ? "新規CSV（保存先未設定）" : "見つからない、または参照できません" : "存在します");
         Property("元ファイルのサイズ", source is null ? "—" : FileSize(source.Length));
         Property("元ファイルの更新日時", source is null ? "—" : source.LastWriteTime.ToString("yyyy/MM/dd HH:mm:ss"));
         Property("文字コード", document.EncodingName);

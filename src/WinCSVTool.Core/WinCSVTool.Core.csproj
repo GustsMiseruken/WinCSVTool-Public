@@ -4,5 +4,6 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.13" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
     <PackageReference Include="MaxMind.Db" Version="5.2.0" />
+    <PackageReference Include="SharpZipLib" Version="1.4.2" />
   </ItemGroup>
 </Project>

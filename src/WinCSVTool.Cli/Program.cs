@@ -29,6 +29,7 @@ internal static class Program
     {
         if (args.Command == "help" || args.Has("help")) { Console.WriteLine(Help); return 0; }
         if (args.Command == "version" || args.Has("version")) { Console.WriteLine(typeof(Program).Assembly.GetName().Version!.ToString(3)); return 0; }
+        if (args.Command == "log-formats") { WriteJson(LogParserRegistry.Definitions, args.Get("out"), token); return 0; }
         string[] commands = ["sql", "convert", "info", "stats", "view", "find", "replace", "decode", "ip", "ip-lookup", "ip-data"];
         if (!commands.Contains(args.Command, StringComparer.Ordinal)) throw new ArgumentException("不明なコマンド: " + args.Command + "（helpで一覧を表示）");
         if (args.Get("out") is { } output && IsXlsx(output) && File.Exists(output) && !args.Has("allow-lossy-xlsx-overwrite") &&
@@ -51,6 +52,8 @@ internal static class Program
         using var workspace = new Workspace(string.IsNullOrWhiteSpace(folder) ? null : folder);
         var tables = Import(workspace, args, defaults, token);
         var documents = tables.Select(t => t.Document).Distinct().ToArray();
+        if(args.Get("out") is { } logOutput && documents.Any(d=>d.ImportSourcePath is { } source && string.Equals(Path.GetFullPath(source),Path.GetFullPath(logOutput),StringComparison.OrdinalIgnoreCase)))
+            throw new ArgumentException("アクセスログ原本には書き込めません。別名の出力先を指定してください。");
         if (args.Command == "info")
         {
             WriteJson(tables.Select(t => new { t.Alias, SqlTable = t.Document.TableName, File = t.Document.DisplayName, Sheet = t.Document.WorksheetName, Rows = t.Document.RowCount, Columns = t.Document.Columns.Select(c => new { c.Name, c.HeaderName, c.Kind }), t.Document.EncodingName, t.Document.HasHeader }), args.Get("out"), token); return 0;
@@ -123,11 +126,16 @@ internal static class Program
         var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var specification in args.All("input"))
         {
-            string? alias = null; var path = specification;
+            string? alias = null; var path = specification; string? inputLogFormat = null;
             var equals = specification.IndexOf('=');
-            if (equals > 0 && Regex.IsMatch(specification[..equals], @"\A[A-Za-z_][A-Za-z0-9_]*\z")) { alias = specification[..equals]; path = specification[(equals + 1)..]; }
+            if (equals > 0)
+            {
+                var name=Regex.Match(specification[..equals],@"\A(?<alias>[A-Za-z_][A-Za-z0-9_]*)(?::(?<format>[A-Za-z0-9_-]+))?\z");
+                if(name.Success){alias=name.Groups["alias"].Value;inputLogFormat=name.Groups["format"].Success?name.Groups["format"].Value:null;path=specification[(equals+1)..];}
+            }
             var read = defaults.ReadOptions(args);
-            IReadOnlyList<CsvDocument> imported = IsXlsx(path) ? new XlsxService(workspace).Import(path, read.HasHeader, token) : [workspace.Import(path, read, token)];
+            var logFormat=inputLogFormat??args.Get("log-format");
+            IReadOnlyList<CsvDocument> imported = logFormat is not null ? [workspace.ImportLog(path, LogOptions(args,read.EncodingName,logFormat),token)] : IsXlsx(path) ? new XlsxService(workspace).Import(path, read.HasHeader, token) : [workspace.Import(path, read, token)];
             if (args.Get("sheet") is { } sheet)
             {
                 imported = int.TryParse(sheet, out var number) ? (number >= 1 && number <= imported.Count ? [imported[number - 1]] : []) : imported.Where(d => string.Equals(d.WorksheetName, sheet, StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -151,6 +159,16 @@ internal static class Program
             command.ExecuteNonQuery();
         }
         return tables;
+    }
+
+    private static LogImportOptions LogOptions(Arguments args,string encoding,string format)
+    {
+        if(args.Has("log-pattern")&&args.Has("log-pattern-file"))throw new ArgumentException("--log-pattern と --log-pattern-file はどちらか一方を指定してください。");
+        var pattern=args.Get("log-pattern");
+        if(args.Get("log-pattern-file") is { } path){if(new FileInfo(path).Length>131072)throw new ArgumentException("ログ書式ファイルは128KiB以下にしてください。");pattern=File.ReadAllText(path,new UTF8Encoding(false,true)).TrimEnd('\r','\n');}
+        var escape=args.Get("log-escape")??"default";
+        if(!Enum.TryParse<LogEscapeMode>(escape,true,out var mode)||!Enum.IsDefined(mode))throw new ArgumentException("--log-escape は default / json / none です。");
+        return new(format,pattern,encoding,mode);
     }
 
     private static int Column(CsvDocument document, string specification)
@@ -237,6 +255,15 @@ WinCSVTool.Cli — CSV / XLSX / SQL / オフラインIP解析
   ip-lookup --address 8.8.8.8 [--country-language en]
   ip-lookup --asn AS15169
   ip-data
+  log-formats
+
+gzip: CSV.gz / TSV.gz の読込と保存に対応。--out result.csv.gz、SQLの--outも利用可能。
+アクセスログ: --log-format nginx/apache/tomcat/jboss/aws-waf/cloudflare-waf
+  --log-pattern 書式本体 または --log-pattern-file UTF8ファイル、--log-escape default/json/none
+  nginxは$変数、他のテキスト形式は%変数を入力（設定ディレクティブ全体ではなく書式本体）。common/combinedも利用可。
+  JSONLの列設定は timestamp,httpRequest.clientIp,$ のようなカンマ区切り。$は原JSONを保持。
+  混在SQL入力: --input logs:nginx=access.log.gz --input lookup=lookup.csv
+  不正行は行位置を示して取込全体を中止。ログ原本への出力は禁止、別名CSV/CSV.gzを指定。
 
 入力: --encoding auto/utf-8/shift_jis/... --delimiter comma/tab/semicolon --no-header --sheet 名前または1からの番号
 出力: --output-encoding utf-8/... --output-delimiter comma/tab/semicolon --no-output-header --bom

@@ -1,7 +1,7 @@
 WinCSVTool third-party notices
 
 The portable distribution bundles the .NET 10.0.13 runtime, Windows Forms,
-Microsoft.Data.Sqlite, SQLitePCLRaw, SQLite, and MaxMind.Db.
+Microsoft.Data.Sqlite, SQLitePCLRaw, SQLite, MaxMind.Db, and SharpZipLib.
 Build scripts append the license and third-party notices from the exact
 .NET runtime packages used to publish the executable.
 
@@ -23,6 +23,12 @@ MaxMind.Db 5.2.0
 https://github.com/maxmind/MaxMind-DB-Reader-dotnet
 Copyright MaxMind, Inc. Licensed under the Apache License, Version 2.0.
 See licenses/MaxMind.Db-Apache-2.0.txt; the portable build appends its full text.
+
+SharpZipLib 1.4.2
+https://github.com/icsharpcode/SharpZipLib/tree/v1.4.2
+Copyright 2000-2018 SharpZipLib Contributors.
+Licensed under the MIT License. Full text is in licenses/SharpZipLib-MIT.txt
+and appended to this file in the portable distribution.
 
 DB-IP Lite IP-to-Country and IP-to-ASN, snapshot 2026-10-01
 IP Geolocation and ASN data by DB-IP.com

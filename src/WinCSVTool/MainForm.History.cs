@@ -25,6 +25,7 @@ internal sealed partial class MainForm
     internal void NotifyDocumentChanged()
     {
         UpdateUndoMenu();
+        _logAnalysis?.RefreshAnalysisValidity();
         try { Workspace.SaveRecoveryCheckpoint(); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException)
         {

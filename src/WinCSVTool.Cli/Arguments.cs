@@ -7,7 +7,7 @@ internal sealed class Arguments
 {
     private readonly Dictionary<string, List<string>> _values = new(StringComparer.Ordinal);
     private static readonly HashSet<string> Flags = ["no-header", "no-output-header", "bom", "regex", "literal-plus", "help", "version", "allow-lossy-xlsx-overwrite", "escape-spreadsheet-formulas"];
-    private static readonly HashSet<string> Values = ["input", "out", "query", "query-file", "column", "kind", "decoded-encoding", "pattern", "replacement", "sort", "filter", "type", "sheet", "address", "asn", "country-language", "ip-data", "work-folder", "encoding", "output-encoding", "delimiter", "output-delimiter", "preview", "start", "settings"];
+    private static readonly HashSet<string> Values = ["input", "out", "query", "query-file", "column", "kind", "decoded-encoding", "pattern", "replacement", "sort", "filter", "type", "sheet", "address", "asn", "country-language", "ip-data", "work-folder", "encoding", "output-encoding", "delimiter", "output-delimiter", "preview", "start", "settings", "log-format", "log-pattern", "log-pattern-file", "log-escape"];
     public string Command { get; }
     public Arguments(string[] args)
     {
