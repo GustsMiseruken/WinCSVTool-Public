@@ -48,6 +48,7 @@ public sealed partial class AnalysisService(Workspace workspace)
     public long ExportQuery(string sql, string path, CsvOptions options, CancellationToken token = default)
     {
         ValidateQuery(sql);
+        workspace.ValidateExportDestination(path);
         CsvCodec.ValidateDelimiter(options.Delimiter);
         using var connection = workspace.OpenConnection(readOnly: true);
         PrepareQueryConnection(connection);
@@ -60,7 +61,8 @@ public sealed partial class AnalysisService(Workspace workspace)
             using var output = new AtomicFile(path);
             long count = 0;
             using (var reader = command.ExecuteReader())
-            using (var writer = new StreamWriter(output.Stream, EncodingDetector.Resolve(options.EncodingName.Equals("auto", StringComparison.OrdinalIgnoreCase) ? "utf-8" : options.EncodingName, options.WriteBom), 65536, true))
+            using (var compressed = CompressedText.OpenWrite(output.Stream, path))
+            using (var writer = new StreamWriter(compressed, EncodingDetector.Resolve(options.EncodingName.Equals("auto", StringComparison.OrdinalIgnoreCase) ? "utf-8" : options.EncodingName, options.WriteBom), 65536, true))
             {
                 if (options.HasHeader) CsvCodec.WriteRecord(writer, ReadColumns(reader), options.Delimiter, options.EscapeSpreadsheetFormulas);
                 while (reader.Read())

@@ -18,7 +18,7 @@ public sealed partial class Workspace
     private const int MaximumRecoveryMetadataBytes = 16 * 1024 * 1024;
     private sealed record RecoveryColumn(string Name, string HeaderName, DataKind Kind);
     private sealed record RecoveryDocument(string TableName, string DisplayName, string? SourcePath, string? WorkbookId,
-        string? WorksheetName, string? WorkbookSourcePath, string EncodingName, bool HasHeader, char Delimiter, RecoveryColumn[] Columns);
+        string? WorksheetName, string? WorkbookSourcePath, string EncodingName, bool HasHeader, char Delimiter, RecoveryColumn[] Columns, string? ImportSourcePath = null);
 
     private void InitializeRecovery()
     {
@@ -47,15 +47,17 @@ public sealed partial class Workspace
     }
 
     private void WriteRecoveryCheckpoint(SqliteConnection connection, SqliteTransaction transaction,
-        CsvDocument? changedDocument = null, IReadOnlyList<CsvColumn>? addedColumns = null, IReadOnlyList<CsvColumn>? replacementColumns = null)
+        CsvDocument? changedDocument = null, IReadOnlyList<CsvColumn>? addedColumns = null, IReadOnlyList<CsvColumn>? replacementColumns = null,
+        IReadOnlyList<CsvDocument>? proposedDocuments = null)
     {
-        if (documents.Count > MaximumDocuments)
+        var targetDocuments = proposedDocuments ?? documents;
+        if (targetDocuments.Count > MaximumDocuments)
             throw new InvalidDataException($"復旧用に保存できる表は最大{MaximumDocuments}個です。直前の復旧情報を保持しています。");
-        var state = documents.Select(d => new RecoveryDocument(d.TableName, d.DisplayName, d.SourcePath, d.WorkbookId,
+        var state = targetDocuments.Select(d => new RecoveryDocument(d.TableName, d.DisplayName, d.SourcePath, d.WorkbookId,
             d.WorksheetName, d.WorkbookSourcePath, d.EncodingName, d.HasHeader, d.Delimiter,
             (d == changedDocument && replacementColumns is not null ? replacementColumns :
                 d == changedDocument && addedColumns is not null ? d.Columns.Concat(addedColumns) : d.Columns)
-                .Select(c => new RecoveryColumn(c.Name, c.HeaderName, c.Kind)).ToArray())).ToArray();
+                .Select(c => new RecoveryColumn(c.Name, c.HeaderName, c.Kind)).ToArray(), d.ImportSourcePath)).ToArray();
         var json = JsonSerializer.Serialize(state);
         if (System.Text.Encoding.UTF8.GetByteCount(json) > MaximumRecoveryMetadataBytes)
             throw new InvalidDataException("復旧用の文書情報が上限16MBを超えています。");
@@ -123,7 +125,7 @@ public sealed partial class Workspace
                 throw new InvalidDataException("復旧用の表情報が不正です。");
             try
             {
-                foreach (var source in new[] { saved.SourcePath, saved.WorkbookSourcePath })
+                foreach (var source in new[] { saved.SourcePath, saved.WorkbookSourcePath, saved.ImportSourcePath })
                     if (source is not null && (!Path.IsPathFullyQualified(source) || Path.GetFullPath(source).Length == 0)) throw new ArgumentException("原本のパスが不正です。");
             }
             catch (ArgumentException ex) { throw new InvalidDataException("復旧用の原本パスが不正です。", ex); }
@@ -132,7 +134,7 @@ public sealed partial class Workspace
             if (!actual.SequenceEqual(new[] { "__id" }.Concat(saved.Columns.Select(c => c.Name)), StringComparer.Ordinal))
                 throw new InvalidDataException("列構造と復旧情報が一致しないため復旧しません。残っている作業データは削除されていません。");
             EncodingDetector.Resolve(saved.EncodingName); CsvCodec.ValidateDelimiter(saved.Delimiter);
-            var doc = new CsvDocument { TableName = saved.TableName, DisplayName = saved.DisplayName, SourcePath = saved.SourcePath,
+            var doc = new CsvDocument { TableName = saved.TableName, DisplayName = saved.DisplayName, SourcePath = saved.SourcePath, ImportSourcePath = saved.ImportSourcePath,
                 WorkbookId = saved.WorkbookId, WorksheetName = saved.WorksheetName, WorkbookSourcePath = saved.WorkbookSourcePath,
                 EncodingName = saved.EncodingName, HasHeader = saved.HasHeader, Delimiter = saved.Delimiter, IsDirty = true };
             foreach (var col in saved.Columns) doc.Columns.Add(new CsvColumn(col.Name) { HeaderName = col.HeaderName, Kind = col.Kind });

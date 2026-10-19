@@ -12,6 +12,7 @@ public sealed class CsvDocument
     public required string TableName { get; init; }
     public required string DisplayName { get; set; }
     public string? SourcePath { get; set; }
+    public string? ImportSourcePath { get; set; }
     public string? WorkbookId { get; set; }
     public string? WorksheetName { get; set; }
     public string? WorkbookSourcePath { get; set; }

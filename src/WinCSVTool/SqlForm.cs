@@ -4,202 +4,140 @@ namespace WinCSVTool;
 
 internal sealed class SqlForm : Form
 {
+    internal const int MaximumQueryTabs = 32;
+    private const long PreviewCharacterBudget = 16 * 1024 * 1024;
     private readonly MainForm _owner;
-    private readonly SqlEditor _sql = new() { Font = new Font("Consolas", 11) };
+    // Active-editor alias retained for the keyboard/insertion path and existing UI integrations.
+    private SqlEditor _sql = null!;
+    private readonly ModernTabControl _queryTabs = new() { Dock = DockStyle.Fill };
     private readonly SqlSchemaTree _schema = new() { TabStop = true };
-    private readonly DataGridView _grid = new() { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, VirtualMode = true, BackgroundColor = Color.White, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None, RowHeadersVisible = false };
     private readonly ToolStrip _bar = new() { Dock = DockStyle.Top, GripStyle = ToolStripGripStyle.Hidden, AutoSize = false, Padding = new Padding(10, 6, 10, 6), Height = 48 };
     private readonly ToolStripButton _cancel = new("中断") { Enabled = false };
+    private readonly ToolStripButton _newQuery = new("＋ 新規クエリ");
+    private readonly ToolStripDropDownButton _queries = new("クエリ");
+    private readonly ToolStripMenuItem _renameQuery = new("名前を変更…");
+    private readonly ToolStripMenuItem _closeQuery = new("クエリを閉じる");
+    private readonly List<ToolStripButton> _commands = [];
     private readonly ToolStripButton _showSchema = new("テーブル一覧") { CheckOnClick = true, Checked = true, ToolTipText = "テーブルと列の一覧を表示します。幅が狭いパネルでは一覧を自動的に隠します。" };
     private readonly ToolStripDropDownButton _layout = new("表示位置");
-    private readonly Label _result = new() { Dock = DockStyle.Bottom, Height = 38, Padding = new Padding(14, 9, 5, 0), Text = "SELECT / WITH を入力して実行します。結果の表示は最大 1,000 行です。" };
-    private readonly SplitContainer _editorSplit;
     private readonly SplitContainer _sides;
     private readonly Panel _schemaPanel;
-    private readonly Panel _editorPanel;
     private readonly Label _schemaTitle;
-    private readonly Label _editorTitle;
-    private readonly Label _resultsTitle;
     private bool _running;
     private bool _hosted;
     private bool _adaptingLayout;
-    private bool _editorSplitterGesture;
     private bool _schemaSplitterGesture;
-    private double _editorRatio = .4;
     private int _preferredSchemaWidth = 260;
-    private QueryResult? _data;
-    private Font? _editorAppearanceFont;
-    private Font? _gridAppearanceFont;
-    private int _gridRowHeight = 30;
+    private int _queryNumber;
+    private long _clock;
+    private SqlQueryPage? _runningPage;
     internal bool IsRunning => _running;
+    internal SqlQueryPage? CurrentQuery => _queryTabs.SelectedTab as SqlQueryPage;
 
     public SqlForm(MainForm owner)
     {
-        _editorAppearanceFont = _sql.Font;
         _owner = owner; Text = "SQL分析 — WinCSVTool"; Width = 1150; Height = 760; MinimumSize = new Size(850, 550);
-        Font = owner.Font; StartPosition = FormStartPosition.CenterParent; BackColor = Color.White; AutoScaleMode = AutoScaleMode.Dpi;
+        Font = owner.Font; StartPosition = FormStartPosition.CenterParent; BackColor = UiTheme.Surface; AutoScaleMode = AutoScaleMode.Dpi;
         void Button(string text, string icon, Func<Task> action)
         {
-            var b = new ToolStripButton(text) { Image = UiTheme.CreateIcon(icon), ImageScaling = ToolStripItemImageScaling.None, Padding = new Padding(8, 3, 8, 3) };
-            b.Click += async (_, _) => await action(); _bar.Items.Add(b);
+            var button = new ToolStripButton(text) { Image = UiTheme.CreateIcon(icon), ImageScaling = ToolStripItemImageScaling.None, Padding = new Padding(8, 3, 8, 3) };
+            button.Click += async (_, _) => await action(); _bar.Items.Add(button); _commands.Add(button);
         }
         Button("実行  Ctrl+Enter", "run", QueryAsync); Button("全結果をCSVに保存…", "save", ExportAsync); Button("新規CSVタブへ…", "table", CreateAsync);
         _bar.Items.Add(new ToolStripSeparator()); _bar.Items.Add(_cancel);
+        _bar.Items.Add(new ToolStripSeparator()); _bar.Items.Add(_newQuery); _bar.Items.Add(_queries);
+        _queries.DropDownItems.AddRange([_renameQuery, _closeQuery]);
+        _newQuery.Click += (_, _) => AddQuery()?.Editor.Focus();
+        _renameQuery.Click += (_, _) => RenameQuery(); _closeQuery.Click += (_, _) => { if (CurrentQuery is { } page) CloseQuery(page); };
         _bar.Items.Add(new ToolStripSeparator()); _bar.Items.Add(_showSchema); _bar.Items.Add(_layout);
         foreach (var (text, layout) in new[] { ("別ウィンドウ", SqlPaneLayout.SeparateWindow), ("CSVの右側", SqlPaneLayout.Right), ("CSVの下側", SqlPaneLayout.Bottom), ("同じウィンドウのタブ", SqlPaneLayout.Tab) })
         {
             var item = new ToolStripMenuItem(text) { Tag = layout };
-            item.Click += async (_, _) => await _owner.SetSqlLayoutAsync(layout);
-            _layout.DropDownItems.Add(item);
+            item.Click += async (_, _) => await _owner.SetSqlLayoutAsync(layout); _layout.DropDownItems.Add(item);
         }
-        _cancel.Image = UiTheme.CreateIcon("cancel"); _cancel.ImageScaling = ToolStripItemImageScaling.None;
-        _cancel.Click += (_, _) => _owner.CancelWork();
-        _editorSplit = new SplitContainer { Size = new Size(850, 650), Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 230, SplitterWidth = 6, Panel1MinSize = 80, Panel2MinSize = 80 };
-        _editorPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 10, 14, 10) };
-        _editorPanel.Controls.Add(_sql);
-        _editorTitle = new Label { Text = "SQL クエリ", Dock = DockStyle.Top, Height = 34, Padding = new Padding(14, 8, 0, 0) };
-        _editorSplit.Panel1.Controls.Add(_editorPanel); _editorSplit.Panel1.Controls.Add(_editorTitle);
-        _resultsTitle = new Label { Text = "結果プレビュー", Dock = DockStyle.Top, Height = 34, Padding = new Padding(14, 8, 0, 0) };
-        _editorSplit.Panel2.Controls.Add(_grid); _editorSplit.Panel2.Controls.Add(_resultsTitle);
+        _cancel.Image = UiTheme.CreateIcon("cancel"); _cancel.ImageScaling = ToolStripItemImageScaling.None; _cancel.Click += (_, _) => _owner.CancelWork();
         _sides = new SplitContainer { Size = new Size(1150, 650), Dock = DockStyle.Fill, SplitterDistance = 260, SplitterWidth = 6, Panel1MinSize = 120, Panel2MinSize = 240 };
-        _schemaPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 10, 10, 10) };
-        _schemaPanel.Controls.Add(_schema);
+        _schemaPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 10, 10, 10) }; _schemaPanel.Controls.Add(_schema);
         _schemaTitle = new Label { Text = "テーブルと列 · ダブルクリックで挿入", AutoEllipsis = true, Dock = DockStyle.Top, Height = 34, Padding = new Padding(14, 8, 0, 0) };
-        _sides.Panel1.Controls.Add(_schemaPanel); _sides.Panel1.Controls.Add(_schemaTitle); _sides.Panel2.Controls.Add(_editorSplit);
-        Controls.Add(_sides); Controls.Add(_bar); Controls.Add(_result);
-        UiTheme.ThemeForm(this); UiTheme.ApplyToolStrip(_bar);
-        _sql.BorderStyle = BorderStyle.None; _schema.BorderStyle = BorderStyle.None;
-        _schema.BackColor = _schemaPanel.BackColor = UiTheme.Header;
-        _schemaTitle.BackColor = _editorTitle.BackColor = _resultsTitle.BackColor = _result.BackColor = UiTheme.Header;
-        _result.ForeColor = UiTheme.Muted;
-        _grid.BackgroundColor = UiTheme.Surface; _grid.BorderStyle = BorderStyle.None;
-        _grid.EnableHeadersVisualStyles = false; _grid.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.Single;
-        _grid.ColumnHeadersHeight = 34; _grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
-        _grid.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle { BackColor = UiTheme.Header, ForeColor = UiTheme.Text, SelectionBackColor = UiTheme.Header, SelectionForeColor = UiTheme.Text, Padding = new Padding(10, 0, 6, 0), Font = Font };
-        _grid.DefaultCellStyle = new DataGridViewCellStyle { BackColor = UiTheme.Surface, ForeColor = UiTheme.Text, SelectionBackColor = UiTheme.Selection, SelectionForeColor = UiTheme.Text, Padding = new Padding(8, 0, 5, 0), Font = Font, Alignment = DataGridViewContentAlignment.MiddleLeft, WrapMode = DataGridViewTriState.False };
-        _grid.GridColor = UiTheme.Border; _grid.RowTemplate.Height = 30; _grid.CellBorderStyle = DataGridViewCellBorderStyle.Single;
-        _grid.AllowUserToDeleteRows = false; _grid.AllowUserToResizeRows = false;
-        _sql.KeyDown += async (_, e) =>
+        _sides.Panel1.Controls.Add(_schemaPanel); _sides.Panel1.Controls.Add(_schemaTitle); _sides.Panel2.Controls.Add(_queryTabs);
+        Controls.Add(_sides); Controls.Add(_bar);
+        _queryTabs.SelectedIndexChanged += (_, _) =>
+        {
+            if (CurrentQuery is { } page) { _sql = page.Editor; page.LastTouched = ++_clock; }
+            UpdateActions(); AdaptLayout();
+        };
+        _queryTabs.CloseRequested += page => { if (page is SqlQueryPage query) CloseQuery(query); };
+        _queryTabs.MouseDoubleClick += (_, e) =>
+        {
+            for (var i = 0; i < _queryTabs.TabCount; i++)
+                if (_queryTabs.GetTabRect(i).Contains(e.Location) && !_queryTabs.CloseBounds(i).Contains(e.Location)) { _queryTabs.SelectedIndex = i; RenameQuery(); break; }
+        };
+        _schema.NodeMouseDoubleClick += (_, e) => { if (e.Node?.Tag is string identifier) CurrentQuery?.Editor.InsertIdentifier(identifier); };
+        _schema.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter && _schema.SelectedNode?.Tag is string identifier) { e.SuppressKeyPress = true; CurrentQuery?.Editor.InsertIdentifier(identifier); } };
+        FormClosing += (_, e) => { if (_running) { _owner.CancelWork(); e.Cancel = true; } };
+        _showSchema.CheckedChanged += (_, _) => AdaptLayout(); Resize += (_, _) => AdaptLayout();
+        _sides.SplitterMoving += (_, _) => { if (!_adaptingLayout) _schemaSplitterGesture = true; };
+        _sides.SplitterMoved += (_, _) => { if (_schemaSplitterGesture && !_adaptingLayout) _preferredSchemaWidth = _sides.SplitterDistance; _schemaSplitterGesture = false; };
+        var initial = owner.Current is { } document ? $"SELECT *\r\nFROM {Workspace.Quote(document.Document.TableName)};" : "";
+        AddQuery(initial); ApplyAppearance(owner.Settings); RefreshSchema();
+        Shown += (_, _) => CurrentQuery?.Editor.Focus();
+    }
+
+    internal SqlQueryPage? AddQuery(string sql = "")
+    {
+        if (_queryTabs.TabCount >= MaximumQueryTabs) { CurrentQuery?.SetMessage($"クエリは最大 {MaximumQueryTabs} タブです。不要なタブを閉じてください。"); return null; }
+        var page = new SqlQueryPage("SQL " + ++_queryNumber, sql);
+        page.Editor.KeyDown += async (_, e) =>
         {
             var shortcut = _owner.Settings.GetShortcut("sqlRun");
             if (shortcut != Keys.None && e.KeyData == shortcut) { e.SuppressKeyPress = true; await QueryAsync(); }
         };
-        _schema.NodeMouseDoubleClick += (_, e) =>
-        {
-            if (e.Node?.Tag is string identifier) _sql.InsertIdentifier(identifier);
-        };
-        _schema.KeyDown += (_, e) =>
-        {
-            if (e.KeyCode == Keys.Enter && _schema.SelectedNode?.Tag is string identifier)
-            { e.SuppressKeyPress = true; _sql.InsertIdentifier(identifier); }
-        };
-        _grid.CellValueNeeded += (_, e) =>
-        {
-            if (_data is { } data && e.RowIndex >= 0 && e.RowIndex < data.Rows.Count && e.ColumnIndex >= 0 && e.ColumnIndex < data.Columns.Count)
-                e.Value = data.Rows[e.RowIndex][e.ColumnIndex];
-        };
-        _grid.RowHeightInfoNeeded += (_, e) => { e.Height = _gridRowHeight; e.MinimumHeight = 2; };
-        FormClosing += (_, e) => { if (_running) { _owner.CancelWork(); e.Cancel = true; } };
-        _showSchema.CheckedChanged += (_, _) => AdaptLayout();
-        Resize += (_, _) => AdaptLayout();
-        // Child docking can finish after the form's Resize event; use its final available height.
-        _editorSplit.SizeChanged += (_, _) => AdaptLayout();
-        _editorSplit.SplitterMoving += (_, _) => { if (!_adaptingLayout) _editorSplitterGesture = true; };
-        _editorSplit.SplitterMoved += (_, _) =>
-        {
-            if (_editorSplitterGesture && !_adaptingLayout)
-            {
-                var available = _editorSplit.ClientSize.Height - _editorSplit.SplitterWidth;
-                if (available > 0) _editorRatio = Math.Clamp(_editorSplit.SplitterDistance / (double)available, .1, .9);
-            }
-            _editorSplitterGesture = false;
-        };
-        _sides.SplitterMoving += (_, _) => { if (!_adaptingLayout) _schemaSplitterGesture = true; };
-        _sides.SplitterMoved += (_, _) =>
-        {
-            if (_schemaSplitterGesture && !_adaptingLayout) _preferredSchemaWidth = _sides.SplitterDistance;
-            _schemaSplitterGesture = false;
-        };
-        if (owner.Current is { } page) _sql.Text = $"SELECT *\r\nFROM {Workspace.Quote(page.Document.TableName)};";
-        RefreshSchema();
-        Shown += (_, _) => _sql.Focus();
+        _queryTabs.TabPages.Add(page); page.ApplyAppearance(_owner.Settings); _queryTabs.SelectedTab = page; _sql = page.Editor; page.LastTouched = ++_clock;
+        UpdateActions(); AdaptLayout(); return page;
+    }
+
+    private void RenameQuery()
+    {
+        if (_running || CurrentQuery is not { } page) return;
+        var name = Dialogs.Text(this, "クエリ名を変更", "クエリの名前", page.Text);
+        if (!string.IsNullOrWhiteSpace(name) && !page.IsDisposed) page.Text = name.Trim();
+    }
+
+    internal bool CloseQuery(SqlQueryPage page)
+    {
+        if (ReferenceEquals(page, _runningPage) || !_queryTabs.TabPages.Contains(page)) return false;
+        if (page.HasUnsavedInput && MessageBox.Show(this, $"「{page.Text}」のSQL入力と結果を破棄して閉じますか？", "クエリを閉じる", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return false;
+        _queryTabs.TabPages.Remove(page); page.Dispose();
+        if (_queryTabs.TabCount == 0 && !IsDisposed && !Disposing) AddQuery();
+        UpdateActions(); return true;
+    }
+
+    private void UpdateActions()
+    {
+        if (IsDisposed) return;
+        foreach (var button in _commands) button.Enabled = !_running && CurrentQuery is not null;
+        _cancel.Enabled = _running; _newQuery.Enabled = _queryTabs.TabCount < MaximumQueryTabs;
+        _renameQuery.Enabled = !_running && CurrentQuery is not null;
+        _closeQuery.Enabled = CurrentQuery is { } current && !ReferenceEquals(current, _runningPage);
+        _layout.Enabled = !_running;
     }
 
     internal void PrepareHost(bool hosted)
     {
-        _hosted = hosted;
-        MinimumSize = hosted ? Size.Empty : new Size(850, 550);
-        TopLevel = !hosted;
-        FormBorderStyle = hosted ? FormBorderStyle.None : FormBorderStyle.Sizable;
-        Dock = hosted ? DockStyle.Fill : DockStyle.None;
-        ShowInTaskbar = !hosted;
-        AdaptLayout();
+        _hosted = hosted; MinimumSize = hosted ? Size.Empty : new Size(850, 550); TopLevel = !hosted;
+        FormBorderStyle = hosted ? FormBorderStyle.None : FormBorderStyle.Sizable; Dock = hosted ? DockStyle.Fill : DockStyle.None; ShowInTaskbar = !hosted; AdaptLayout();
     }
 
     internal void ApplyAppearance(AppSettings settings)
     {
-        UiTheme.ThemeForm(this);
-        UiTheme.ApplyToolStrip(_bar);
-        var editorFont = UiTheme.CreateEditorFont(settings);
-        if (_sql.Font.Equals(editorFont)) editorFont.Dispose();
-        else
-        {
-            var previous = _editorAppearanceFont;
-            _sql.Font = _editorAppearanceFont = editorFont;
-            previous?.Dispose();
-        }
-        _sql.BorderStyle = _schema.BorderStyle = BorderStyle.None;
-        _sql.ApplyColors();
-        _schema.BackColor = _schemaPanel.BackColor = UiTheme.Header;
-        _schemaTitle.BackColor = _editorTitle.BackColor = _resultsTitle.BackColor = _result.BackColor = UiTheme.Header;
-        _result.ForeColor = UiTheme.Muted;
-        _grid.BackgroundColor = UiTheme.Surface;
-        _grid.GridColor = UiTheme.Border;
-        _grid.DefaultCellStyle.BackColor = UiTheme.Surface;
-        _grid.DefaultCellStyle.ForeColor = UiTheme.Text;
-        _grid.DefaultCellStyle.SelectionBackColor = UiTheme.Selection;
-        _grid.DefaultCellStyle.SelectionForeColor = UiTheme.Text;
-        var gridFont = UiTheme.CreateGridFont(settings);
-        if (_grid.DefaultCellStyle.Font?.Equals(gridFont) == true) gridFont.Dispose();
-        else
-        {
-            var previous = _gridAppearanceFont;
-            _grid.DefaultCellStyle.Font = _gridAppearanceFont = gridFont;
-            previous?.Dispose();
-        }
-        _grid.ColumnHeadersDefaultCellStyle.BackColor = UiTheme.Header;
-        _grid.ColumnHeadersDefaultCellStyle.ForeColor = UiTheme.Text;
-        _grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = UiTheme.Header;
-        _grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = UiTheme.Text;
-        _grid.ColumnHeadersDefaultCellStyle.Font = Font;
-        _gridRowHeight = Math.Max(26, (int)Math.Ceiling(_grid.DefaultCellStyle.Font.GetHeight() + 12));
-        _grid.RowTemplate.Height = _gridRowHeight;
-        if (_grid.RowCount > 0) _grid.UpdateRowHeightInfo(0, true);
+        UiTheme.ThemeForm(this); UiTheme.ApplyToolStrip(_bar);
+        foreach (SqlQueryPage page in _queryTabs.TabPages) page.ApplyAppearance(settings);
+        _schema.BorderStyle = BorderStyle.None; _schema.BackColor = _schemaPanel.BackColor = _schemaTitle.BackColor = UiTheme.Header;
         foreach (ToolStripMenuItem item in _layout.DropDownItems) item.Checked = item.Tag is SqlPaneLayout layout && layout == settings.SqlLayout;
-        var runShortcut = settings.GetShortcut("sqlRun");
-        _bar.Items[0].Text = runShortcut == Keys.None ? "実行" : "実行  " + ShortcutCatalog.Format(runShortcut);
-        // Regenerate native line icons so their foreground follows the active theme.
-        foreach (ToolStripItem item in _bar.Items)
-        {
-            var text = item.Text ?? "";
-            var key = text.StartsWith("実行") ? "run" : text.StartsWith("全結果") ? "save" : text.StartsWith("新規CSV") ? "table" : ReferenceEquals(item, _cancel) ? "cancel" : null;
-            if (key is null) continue;
-            var previous = item.Image;
-            item.Image = UiTheme.CreateIcon(key);
-            previous?.Dispose();
-        }
-        AdaptLayout();
-        Invalidate(true);
-    }
-
-    protected override void Dispose(bool disposing)
-    {
-        base.Dispose(disposing);
-        if (disposing)
-        {
-            _editorAppearanceFont?.Dispose();
-            _gridAppearanceFont?.Dispose();
-        }
+        var shortcut = settings.GetShortcut("sqlRun"); _commands[0].Text = shortcut == Keys.None ? "実行" : "実行  " + ShortcutCatalog.Format(shortcut);
+        foreach (var (item, icon) in new[] { (_commands[0], "run"), (_commands[1], "save"), (_commands[2], "table"), (_cancel, "cancel") })
+        { var previous = item.Image; item.Image = UiTheme.CreateIcon(icon); previous?.Dispose(); }
+        AdaptLayout(); UpdateActions(); Invalidate(true);
     }
 
     private void AdaptLayout()
@@ -208,37 +146,17 @@ internal sealed class SqlForm : Form
         _adaptingLayout = true;
         try
         {
-            var compact = _hosted && ClientSize.Height < 400;
-            var tiny = compact && ClientSize.Height < 250;
-            var titleHeight = compact ? Math.Max(26, Font.Height) : 34;
+            var compact = _hosted && ClientSize.Height < 400; var tiny = compact && ClientSize.Height < 250;
             _bar.Height = compact ? Math.Max(40, Font.Height + 14) : 48;
             _bar.Padding = compact ? new Padding(10, 2, 10, 2) : new Padding(10, 6, 10, 6);
-            _result.Height = compact ? Math.Max(26, Font.Height + 2) : 38;
-            _result.Padding = compact ? new Padding(10, 2, 5, 0) : new Padding(14, 9, 5, 0);
-            _editorTitle.Height = _resultsTitle.Height = _schemaTitle.Height = titleHeight;
-            _editorTitle.Visible = _resultsTitle.Visible = !tiny;
-            _editorTitle.Padding = _resultsTitle.Padding = _schemaTitle.Padding = new Padding(14, compact ? 0 : 8, 0, 0);
-            _editorPanel.Padding = compact ? new Padding(10, 2, 10, 2) : new Padding(14, 10, 14, 10);
+            _schemaTitle.Height = compact ? Math.Max(26, Font.Height) : 34;
+            _schemaTitle.Padding = new Padding(14, compact ? 0 : 8, 0, 0);
             _schemaPanel.Padding = compact ? new Padding(10, 4, 8, 4) : new Padding(14, 10, 10, 10);
-            _grid.ColumnHeadersHeight = compact ? Math.Max(26, Font.Height + 2) : 34;
             _sides.Panel1Collapsed = !_showSchema.Checked || (_hosted && ClientSize.Width < 740);
             if (!_schemaSplitterGesture && !_sides.Panel1Collapsed && _sides.Width >= 366)
                 _sides.SplitterDistance = Math.Clamp(_preferredSchemaWidth, 120, Math.Max(120, _sides.Width - _sides.SplitterWidth - 240));
-            // Chrome heights changed above; finish docking before computing the proportional split.
-            PerformLayout();
-            _sides.PerformLayout();
-            _sides.Panel2.PerformLayout();
-            var available = Math.Max(0, _editorSplit.ClientSize.Height - _editorSplit.SplitterWidth);
-            var editorMinimum = (tiny ? 0 : titleHeight) + _editorPanel.Padding.Vertical + _sql.Font.Height + SystemInformation.HorizontalScrollBarHeight;
-            var resultsMinimum = (tiny ? 0 : titleHeight) + _grid.ColumnHeadersHeight + _gridRowHeight;
-            var scale = Math.Min(1d, available / (double)Math.Max(1, editorMinimum + resultsMinimum));
-            editorMinimum = (int)(editorMinimum * scale);
-            resultsMinimum = (int)(resultsMinimum * scale);
-            _editorSplit.Panel1MinSize = _editorSplit.Panel2MinSize = 0;
-            _editorSplit.Panel1MinSize = editorMinimum;
-            _editorSplit.Panel2MinSize = resultsMinimum;
-            if (available > 0)
-                _editorSplit.SplitterDistance = Math.Clamp((int)Math.Round(available * _editorRatio), editorMinimum, Math.Max(editorMinimum, available - resultsMinimum));
+            PerformLayout(); _sides.PerformLayout(); _sides.Panel2.PerformLayout(); _queryTabs.PerformLayout();
+            foreach (SqlQueryPage page in _queryTabs.TabPages) page.AdaptLayout(compact, tiny);
         }
         finally { _adaptingLayout = false; }
     }
@@ -250,73 +168,90 @@ internal sealed class SqlForm : Form
         try
         {
             _schema.Nodes.Clear();
-            TreeNode Identifier(string text, string identifier) => new(text)
-            {
-                Tag = Workspace.Quote(identifier), ToolTipText = $"ダブルクリックまたはEnterで {Workspace.Quote(identifier)} を挿入"
-            };
+            TreeNode Identifier(string text, string identifier) => new(text) { Tag = Workspace.Quote(identifier), ToolTipText = $"ダブルクリックまたはEnterで {Workspace.Quote(identifier)} を挿入" };
             var database = Identifier("main — 作業データベース", "main");
             foreach (var document in _owner.Workspace.Documents)
             {
                 var table = Identifier($"{document.TableName} — {document.DisplayName}", document.TableName);
                 foreach (var column in document.Columns) table.Nodes.Add(Identifier(column.Name, column.Name));
-                database.Nodes.Add(table);
-                table.Expand();
+                database.Nodes.Add(table); table.Expand();
             }
-            _schema.Nodes.Add(database);
-            database.Expand();
+            _schema.Nodes.Add(database); database.Expand();
             var help = new TreeNode("SQL関数と書き方");
-            help.Nodes.Add("数値: WCT_NUMBER(列)");
-            help.Nodes.Add("日時: WCT_TIMESTAMP(列)");
-            help.Nodes.Add("真偽: WCT_BOOLEAN(列)");
-            help.Nodes.Add("正規表現: 列 REGEXP '式'");
-            help.Nodes.Add("結合: FROM t1 a JOIN t2 b ON a.\"id\" = b.\"id\"");
-            _schema.Nodes.Add(help);
-            help.Expand();
+            help.Nodes.Add("数値: WCT_NUMBER(列)"); help.Nodes.Add("日時: WCT_TIMESTAMP(列)"); help.Nodes.Add("真偽: WCT_BOOLEAN(列)");
+            help.Nodes.Add("正規表現: 列 REGEXP '式'"); help.Nodes.Add("結合: FROM t1 a JOIN t2 b ON a.\"id\" = b.\"id\"");
+            _schema.Nodes.Add(help); help.Expand();
         }
         finally { _schema.EndUpdate(); }
     }
 
-    private async Task<bool> Run(string title, Action<CancellationToken> work)
+    private async Task<bool> Run(SqlQueryPage page, string title, Action<CancellationToken> work, Func<Task> completed)
     {
-        if (_running) return false; _running = true; _sql.Enabled = false;
-        foreach (ToolStripItem item in _bar.Items) item.Enabled = ReferenceEquals(item, _cancel);
-        try { return await _owner.RunWork(title, work); }
+        if (_running || page.IsDisposed || !_queryTabs.TabPages.Contains(page)) return false;
+        _running = true; _runningPage = page; page.Editor.Enabled = false; page.SetMessage(title + "…"); UpdateActions();
+        Exception? failure = null;
+        try
+        {
+            var success = await _owner.RunWork(title, token => { try { work(token); } catch (Exception exception) { failure = exception; throw; } });
+            if (page.IsDisposed || IsDisposed || !_queryTabs.TabPages.Contains(page)) return false;
+            if (success) await completed();
+            else page.SetMessage((failure is OperationCanceledException ? "処理を中断しました。" : failure is not null ? "実行できませんでした。" : "処理を開始できませんでした。") + (page.Data is not null ? "直前の結果プレビューは保持しています。" : ""));
+            return success;
+        }
         finally
         {
-            _running = false; _sql.Enabled = true;
-            foreach (ToolStripItem item in _bar.Items) item.Enabled = !ReferenceEquals(item, _cancel);
+            if (!page.IsDisposed) page.Editor.Enabled = true;
+            _running = false; _runningPage = null; UpdateActions();
+        }
+    }
+
+    private void TrimPreviews()
+    {
+        var pages = _queryTabs.TabPages.Cast<SqlQueryPage>().ToArray(); var total = pages.Sum(page => page.PreviewCharacters);
+        foreach (var page in pages.Where(page => page != CurrentQuery && page != _runningPage && page.Data is not null).OrderBy(page => page.LastTouched))
+        {
+            if (total <= PreviewCharacterBudget) break;
+            total -= page.PreviewCharacters; page.ReleasePreview();
         }
     }
 
     private async Task QueryAsync()
     {
-        var sql = _sql.Text; QueryResult? data = null;
-        if (!await Run("SQLを実行", token => data = new AnalysisService(_owner.Workspace).Query(sql, 1000, token))) return;
-        _grid.RowCount = 0; _data = null; _grid.Columns.Clear();
-        for (var i = 0; i < data!.Columns.Count; i++) _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "c" + i, HeaderText = data.Columns[i], Width = 180, SortMode = DataGridViewColumnSortMode.NotSortable });
-        _data = data; _grid.RowCount = data.Rows.Count; _grid.Invalidate();
-        _result.Text = $"{data.Rows.Count:N0} 行を表示{(data.Truncated ? "（表示上限に達しました。全件はCSV保存または新規タブへ）" : "")}";
+        if (_running || CurrentQuery is not { } page) return;
+        var sql = page.Editor.Text; QueryResult? data = null;
+        await Run(page, "SQLを実行", token => data = new AnalysisService(_owner.Workspace).Query(sql, 1000, token), () =>
+        { page.ShowResult(sql, data!); page.LastTouched = ++_clock; TrimPreviews(); return Task.CompletedTask; });
     }
 
     private async Task ExportAsync()
     {
-        var defaults = new CsvDocument
-        {
-            TableName = "", DisplayName = "query.csv", EncodingName = _owner.Settings.DefaultSaveEncodingName,
-            Delimiter = _owner.Settings.DefaultDelimiter, HasHeader = true
-        };
+        if (_running || CurrentQuery is not { } page) return;
+        var sql = page.Editor.Text;
+        var defaults = new CsvDocument { TableName = "", DisplayName = "query.csv", EncodingName = _owner.Settings.DefaultSaveEncodingName, Delimiter = _owner.Settings.DefaultDelimiter, HasHeader = true };
         var options = Dialogs.Csv(this, true, defaults, _owner.Settings.DefaultWriteBom); if (options is null) return;
         using var dialog = new SaveFileDialog { Filter = "CSV|*.csv|すべてのファイル|*.*", FileName = "query.csv" };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        var sql = _sql.Text; var path = dialog.FileName; long count = 0;
-        if (await Run("SQLの全結果をCSVに保存", token => count = new AnalysisService(_owner.Workspace).ExportQuery(sql, path, options, token))) _result.Text = $"{count:N0} 行を保存しました。";
+        await ExportQueryAsync(page, sql, dialog.FileName, options);
+    }
+
+    private Task<bool> ExportQueryAsync(SqlQueryPage page, string sql, string path, CsvOptions options)
+    {
+        long count = 0;
+        return Run(page, "SQLの全結果をCSVに保存", token => count = new AnalysisService(_owner.Workspace).ExportQuery(sql, path, options, token), () => { page.SetMessage($"{count:N0} 行を保存しました。"); return Task.CompletedTask; });
     }
 
     private async Task CreateAsync()
     {
+        if (_running || CurrentQuery is not { } page) return;
+        var sql = page.Editor.Text;
         var name = Dialogs.Text(this, "SQL結果から新規CSV", "新規タブ名", "query.csv"); if (name is null) return;
-        var sql = _sql.Text; CsvDocument? doc = null;
-        if (!await Run("SQL結果から新規CSVを作成", token => doc = new AnalysisService(_owner.Workspace).CreateFromQuery(sql, name, token))) return;
-        await _owner.AddDocumentAsync(doc!); RefreshSchema(); _result.Text = $"{doc!.RowCount:N0}行の新規CSVタブを作成しました。";
+        await CreateQueryAsync(page, sql, name);
+    }
+
+    private Task<bool> CreateQueryAsync(SqlQueryPage page, string sql, string name)
+    {
+        CsvDocument? document = null;
+        return Run(page, "SQL結果から新規CSVを作成", token => document = new AnalysisService(_owner.Workspace).CreateFromQuery(sql, name, token), async () =>
+        { await _owner.AddDocumentAsync(document!); RefreshSchema(); if (!page.IsDisposed) page.SetMessage($"{document!.RowCount:N0}行の新規CSVタブを作成しました。"); });
     }
 }

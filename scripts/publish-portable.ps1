@@ -28,7 +28,13 @@ $outputName = "WinCSVTool-$Version-portable"
 $output = Join-Path $OutputRoot $outputName
 $archive = Join-Path $OutputRoot "WinCSVTool-$Version-win-x64-portable.zip"
 $hashFile = Join-Path $OutputRoot "WinCSVTool-$Version-SHA256SUMS.txt"
-foreach ($path in @($output, $archive, $hashFile)) {
+$packages = @(
+    [PSCustomObject]@{ Kind = 'Combined'; Name = $outputName; Directory = $output; Archive = $archive; Executables = @('WinCSVTool.exe', 'WinCSVTool.Cli.exe') },
+    [PSCustomObject]@{ Kind = 'GUI'; Name = "WinCSVTool-$Version-gui-portable"; Directory = (Join-Path $OutputRoot "WinCSVTool-$Version-gui-portable"); Archive = (Join-Path $OutputRoot "WinCSVTool-$Version-win-x64-gui-portable.zip"); Executables = @('WinCSVTool.exe') },
+    [PSCustomObject]@{ Kind = 'CLI'; Name = "WinCSVTool-$Version-cli-portable"; Directory = (Join-Path $OutputRoot "WinCSVTool-$Version-cli-portable"); Archive = (Join-Path $OutputRoot "WinCSVTool-$Version-win-x64-cli-portable.zip"); Executables = @('WinCSVTool.Cli.exe') }
+)
+foreach ($path in @($packages.Directory) + @($packages.Archive) + @($hashFile, $BuildRecordPath)) {
+    if (-not $path) { continue }
     if (Test-Path -LiteralPath $path) { throw "An existing artifact will not be overwritten: $path" }
 }
 New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
@@ -66,7 +72,7 @@ $assetsPath = (& $DotnetPath msbuild (Join-Path $repository 'src/WinCSVTool/WinC
 if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the package assets file.' }
 $assets = Get-Content -LiteralPath $assetsPath -Raw | ConvertFrom-Json
 $noticesPath = Join-Path $packageStage 'THIRD-PARTY-NOTICES.txt'
-foreach ($notice in @('SQLitePCLRaw-Apache-2.0.txt', 'MaxMind.Db-Apache-2.0.txt')) {
+foreach ($notice in @('SQLitePCLRaw-Apache-2.0.txt', 'MaxMind.Db-Apache-2.0.txt', 'SharpZipLib-MIT.txt')) {
     Add-Content -LiteralPath $noticesPath -Value ([Environment]::NewLine + "===== $notice =====") -Encoding utf8
     Add-Content -LiteralPath $noticesPath -Value (Get-Content -LiteralPath (Join-Path $repository "licenses/$notice") -Raw) -Encoding utf8
 }
@@ -128,28 +134,44 @@ if ($SigningCertificateThumbprint) {
     $signed = $true
 }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$temporaryArchive = Join-Path $staging 'package.zip'
-$stream = [IO.File]::Open($temporaryArchive, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-$zip = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create)
-try {
-    foreach ($name in $packageFiles) {
-        $entry = $zip.CreateEntry("$outputName/$name", [IO.Compression.CompressionLevel]::Optimal)
-        $entry.LastWriteTime = [DateTimeOffset]::new(2026, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
-        $sourceStream = [IO.File]::OpenRead((Join-Path $packageStage $name))
-        try {
-            $entryStream = $entry.Open()
-            try { $sourceStream.CopyTo($entryStream) } finally { $entryStream.Dispose() }
-        } finally { $sourceStream.Dispose() }
+$hashLines = [Collections.Generic.List[string]]::new()
+$packageRecords = [Collections.Generic.List[object]]::new()
+foreach ($package in $packages) {
+    $files = @($packageFiles | Where-Object { $_ -notin @('WinCSVTool.exe', 'WinCSVTool.Cli.exe') -or $_ -in $package.Executables })
+    $directory = Join-Path $staging $package.Name
+    if ($package.Kind -ne 'Combined') {
+        # Copy the already-published and optionally signed files, so each flavor
+        # contains exactly the same binaries and reference data as the set.
+        foreach ($name in $files) {
+            $destination = Join-Path $directory $name
+            New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($destination)) -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $packageStage $name) -Destination $destination
+        }
     }
-} finally { $zip.Dispose(); $stream.Dispose() }
-$digest = (Get-FileHash -LiteralPath $temporaryArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-$hashLines = @("$digest  $([IO.Path]::GetFileName($archive))")
-foreach ($name in @('WinCSVTool.exe', 'WinCSVTool.Cli.exe')) {
-    $hashLines += "$((Get-FileHash -LiteralPath (Join-Path $packageStage $name) -Algorithm SHA256).Hash.ToLowerInvariant())  $outputName/$name"
+    $temporaryArchive = Join-Path $staging ($package.Kind + '.zip')
+    $stream = [IO.File]::Open($temporaryArchive, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $zip = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($name in $files) {
+            $entry = $zip.CreateEntry("$($package.Name)/$name", [IO.Compression.CompressionLevel]::Optimal)
+            $entry.LastWriteTime = [DateTimeOffset]::new(2026, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+            $sourceStream = [IO.File]::OpenRead((Join-Path $directory $name))
+            try {
+                $entryStream = $entry.Open()
+                try { $sourceStream.CopyTo($entryStream) } finally { $entryStream.Dispose() }
+            } finally { $sourceStream.Dispose() }
+        }
+    } finally { $zip.Dispose(); $stream.Dispose() }
+    $digest = (Get-FileHash -LiteralPath $temporaryArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hashLines.Add("$digest  $([IO.Path]::GetFileName($package.Archive))")
+    foreach ($name in $package.Executables) {
+        $hashLines.Add("$((Get-FileHash -LiteralPath (Join-Path $directory $name) -Algorithm SHA256).Hash.ToLowerInvariant())  $($package.Name)/$name")
+    }
+    $packageRecords.Add([PSCustomObject]@{ Kind = $package.Kind; Directory = $package.Directory; Archive = $package.Archive; SHA256 = $digest; Files = $files })
 }
 $temporaryHashes = Join-Path $staging 'SHA256SUMS.txt'
 [IO.File]::WriteAllLines($temporaryHashes, $hashLines, [Text.UTF8Encoding]::new($false))
-$record = [ordered]@{ version = $Version; sdk = $actualSdk; runtime = '10.0.13'; signed = $signed; zip_sha256 = $digest; package_files = @($packageFiles); lock_sha256 = @{} }
+$record = [ordered]@{ version = $Version; sdk = $actualSdk; runtime = '10.0.13'; signed = $signed; zip_sha256 = $packageRecords[0].SHA256; package_files = @($packageFiles); packages = @($packageRecords.ToArray()); lock_sha256 = @{} }
 foreach ($name in @('WinCSVTool.Core', 'WinCSVTool', 'WinCSVTool.Cli')) {
     $record.lock_sha256[$name] = (Get-FileHash -LiteralPath (Join-Path $repository "src/$name/packages.lock.json") -Algorithm SHA256).Hash
 }
@@ -158,7 +180,14 @@ if ($BuildRecordPath) {
     New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($BuildRecordPath))) -Force | Out-Null
     $record | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $BuildRecordPath -Encoding utf8
 }
-[IO.Directory]::Move($packageStage, $output)
-[IO.File]::Move($temporaryArchive, $archive)
+foreach ($package in $packages) {
+    # All source and destination paths are fixed descendants of OutputRoot.
+    $source = [IO.Path]::GetFullPath((Join-Path $staging $package.Name))
+    $destination = [IO.Path]::GetFullPath($package.Directory)
+    $outputPrefix = $OutputRoot.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $source.StartsWith($outputPrefix, [StringComparison]::OrdinalIgnoreCase) -or -not $destination.StartsWith($outputPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Package directory escaped OutputRoot.' }
+    [IO.Directory]::Move($source, $destination)
+    [IO.File]::Move((Join-Path $staging ($package.Kind + '.zip')), $package.Archive)
+}
 [IO.File]::Move($temporaryHashes, $hashFile)
-[PSCustomObject]@{ Version = $Version; Directory = $output; Archive = $archive; HashFile = $hashFile; SHA256 = $digest; Signed = $signed }
+[PSCustomObject]@{ Version = $Version; Directory = $output; Archive = $archive; HashFile = $hashFile; SHA256 = $packageRecords[0].SHA256; Signed = $signed; Packages = @($packageRecords.ToArray()) }

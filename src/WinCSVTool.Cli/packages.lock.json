@@ -31,6 +31,11 @@
           "SQLitePCLRaw.core": "2.1.13"
         }
       },
+      "SharpZipLib": {
+        "type": "Transitive",
+        "resolved": "1.4.2",
+        "contentHash": "yjj+3zgz8zgXpiiC3ZdF/iyTBbz2fFvMxZFEBPUcwZjIvXOf37Ylm+K58hqMfIBt5JgU/Z2uoUS67JmTLe973A=="
+      },
       "SQLitePCLRaw.bundle_e_sqlite3": {
         "type": "Transitive",
         "resolved": "2.1.13",
@@ -63,7 +68,8 @@
         "dependencies": {
           "MaxMind.Db": "[5.2.0, )",
           "Microsoft.Data.Sqlite": "[10.0.13, )",
-          "SQLitePCLRaw.bundle_e_sqlite3": "[2.1.13, )"
+          "SQLitePCLRaw.bundle_e_sqlite3": "[2.1.13, )",
+          "SharpZipLib": "[1.4.2, )"
         }
       }
     },

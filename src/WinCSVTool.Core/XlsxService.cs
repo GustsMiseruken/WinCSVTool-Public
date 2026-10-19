@@ -89,6 +89,7 @@ public sealed class XlsxService(Workspace workspace)
     public void Export(string path, IReadOnlyList<CsvDocument> documents, bool includeHeader = true, CancellationToken token = default, RowScope? scope = null)
     {
         token.ThrowIfCancellationRequested();
+        workspace.ValidateExportDestination(path);
         if (documents.Count == 0) throw new ArgumentException("保存するシートを選択してください。", nameof(documents));
         if (documents.Count > 1024) throw new ArgumentException("一度に保存できるシートは 1,024 枚までです。", nameof(documents));
         if (scope is not null)

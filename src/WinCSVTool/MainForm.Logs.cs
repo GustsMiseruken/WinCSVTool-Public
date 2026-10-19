@@ -10,7 +10,7 @@ internal sealed partial class MainForm
     private IpAnalysisService? _ipReference;
     internal IpAnalysisService IpReference => _ipReference ??= new IpAnalysisService();
 
-    private void OpenLogAnalysis()
+    private void OpenLogAnalysis(string feature = "ip")
     {
         if (_busy) return;
         var selected = Current?.Document;
@@ -19,7 +19,7 @@ internal sealed partial class MainForm
             _logTab = new TabPage("ログ解析") { Tag = "logs", Padding = Padding.Empty, BackColor = UiTheme.Surface };
             _logAnalysis = new LogAnalysisPage(this); _logTab.Controls.Add(_logAnalysis); _tabs.TabPages.Add(_logTab);
         }
-        _logAnalysis!.RefreshDocuments(selected); _logAnalysis.ApplyAppearance(); _tabs.SelectedTab = _logTab; UpdateInspector();
+        _logAnalysis!.RefreshDocuments(selected); _logAnalysis.SelectFeature(feature); _logAnalysis.ApplyAppearance(); _tabs.SelectedTab = _logTab; UpdateInspector();
     }
 
     internal async Task<bool> EnrichLogAsync(CsvDocument document, int column, IpEnrichmentFields fields = IpEnrichmentFields.All)
@@ -34,7 +34,7 @@ internal sealed partial class MainForm
     }
 }
 
-internal sealed class LogAnalysisPage : UserControl
+internal sealed class IpLogAnalysisPage : UserControl
 {
     private sealed record DocumentChoice(CsvDocument Document)
     {
@@ -55,7 +55,7 @@ internal sealed class LogAnalysisPage : UserControl
     internal IpEnrichmentFields SelectedFields => _fieldChecks.Where(c => c.Checked).Aggregate(IpEnrichmentFields.None, (fields, c) => fields | (IpEnrichmentFields)c.Tag!);
     private bool _refreshing;
 
-    internal LogAnalysisPage(MainForm owner)
+    internal IpLogAnalysisPage(MainForm owner)
     {
         _owner = owner; Dock = DockStyle.Fill; Padding = new Padding(18);
         var inputs = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3, RowCount = 10, Padding = Padding.Empty };

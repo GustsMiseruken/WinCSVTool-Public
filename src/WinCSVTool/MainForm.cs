@@ -56,6 +56,7 @@ internal sealed partial class MainForm : Form
         _inspector.Controls.Add(inputFrame); _inspector.Controls.Add(applyFrame); _inspector.Controls.Add(_address); _inspector.Controls.Add(_cellLabel);
         _inspector.Paint += (_, e) => { using var pen = new Pen(UiTheme.Border); e.Graphics.DrawLine(pen, 0, 0, Width, 0); };
         _tabs.SelectedIndexChanged += (_, _) => UpdateInspector();
+        _tabs.Selecting += (_, e) => { if (_busy && (_sqlForm?.IsRunning != true || e.TabPage != _sqlTab)) e.Cancel = true; };
         _tabs.CloseRequested += async page => await CloseWorkspaceTabAsync(page);
         _tabs.MouseUp += async (_, e) => { if (e.Button == MouseButtons.Middle) { for (var i = 0; i < _tabs.TabCount; i++) if (_tabs.GetTabRect(i).Contains(e.Location)) { await CloseWorkspaceTabAsync(_tabs.TabPages[i]); break; } } };
         _contentSplit.Panel1.Controls.Add(_tabs);
@@ -82,7 +83,7 @@ internal sealed partial class MainForm : Form
     private void BuildMenus()
     {
         var file = CreateMenu("ファイル(&F)");
-        Item(file, "CSV / Excelを開く…", async () => await ChooseOpenAsync(), Keys.Control | Keys.O, "open");
+        Item(file, "CSV / Excel / ログを開く…", async () => await ChooseOpenAsync(), Keys.Control | Keys.O, "open");
         Item(file, "新規CSV…", async () => await NewAsync(), Keys.Control | Keys.N, "new");
         Item(file, "名前を付けて保存…", async () => await SaveAsync(false), Keys.Control | Keys.S, "save");
         Item(file, "表示結果を保存…", async () => await SaveAsync(true));
@@ -109,6 +110,10 @@ internal sealed partial class MainForm : Form
         Item(data, "SQL分析", () => { OpenSql(); return Task.CompletedTask; }, Keys.Control | Keys.Q, "sql");
         var logs = CreateMenu("ログ解析(&L)");
         Item(logs, "IP・ASNを解析…", () => { OpenLogAnalysis(); return Task.CompletedTask; });
+        Item(logs, "アクセスログを開く…", () => { OpenLogAnalysis("import"); return Task.CompletedTask; });
+        Item(logs, "時刻の正規化・変換…", () => { OpenLogAnalysis("time"); return Task.CompletedTask; });
+        Item(logs, "グラフで調査…", () => { OpenLogAnalysis("series"); return Task.CompletedTask; });
+        Item(logs, "攻撃パターン分類…", () => { OpenLogAnalysis("attack"); return Task.CompletedTask; });
         var view = CreateMenu("表示(&V)");
         Item(view, "セルの折り返し切替", () => { ToggleWrap(); return Task.CompletedTask; }, commandId: "wrap");
         Item(view, "再表示", async () => { if (Current is { } p) await p.ReloadAsync(); }, Keys.F5, "refresh");
@@ -177,12 +182,21 @@ internal sealed partial class MainForm : Form
     internal async Task<bool> RunWork(string title, Action<CancellationToken> action, bool canCancel = true)
     {
         if (_busy) return false;
+        var interactiveSql = _sqlForm?.IsRunning == true && _sqlTab is not null && _tabs.SelectedTab == _sqlTab;
+        var disabledPages = interactiveSql ? _tabs.TabPages.Cast<TabPage>().Where(page => page != _sqlTab).Select(page => (Page: page, page.Enabled)).ToArray() : [];
         _busy = true; _operation = new(); _operationCancellable = canCancel; _progress.Visible = true; _cancel.Enabled = canCancel;
-        _menu.Enabled = _tools.Enabled = _tabs.Enabled = _inspector.Enabled = false; _state.Text = title + "…";
+        _menu.Enabled = _tools.Enabled = _inspector.Enabled = false; _tabs.Enabled = interactiveSql;
+        foreach (var page in disabledPages) page.Page.Enabled = false;
+        _state.Text = title + "…";
         try { await Task.Run(() => action(_operation.Token)); _state.Text = title + " — 完了"; NotifyDocumentChanged(); return true; }
         catch (OperationCanceledException) { _state.Text = "処理を中断しました"; return false; }
         catch (Exception ex) { ShowError(ex); return false; }
-        finally { _operation.Dispose(); _operation = null; _operationCancellable = false; _busy = false; _progress.Visible = false; _cancel.Enabled = false; _menu.Enabled = _tools.Enabled = _tabs.Enabled = _inspector.Enabled = true; }
+        finally
+        {
+            _operation.Dispose(); _operation = null; _operationCancellable = false; _busy = false; _progress.Visible = false; _cancel.Enabled = false;
+            foreach (var page in disabledPages) if (!page.Page.IsDisposed) page.Page.Enabled = page.Enabled;
+            _menu.Enabled = _tools.Enabled = _tabs.Enabled = _inspector.Enabled = true;
+        }
     }
 
     internal void ShowError(Exception? ex)
@@ -195,7 +209,7 @@ internal sealed partial class MainForm : Form
 
     private async Task ChooseOpenAsync()
     {
-        using var dialog = new OpenFileDialog { Filter = "CSV / Excel|*.csv;*.tsv;*.txt;*.xlsx|CSV / TSV|*.csv;*.tsv;*.txt|Excelブック|*.xlsx|すべてのファイル|*.*", Multiselect = true };
+        using var dialog = new OpenFileDialog { Filter = "CSV / Excel / ログ / gzip|*.csv;*.tsv;*.txt;*.xlsx;*.gz;*.log;*.jsonl;*.ndjson|CSV / TSV / gzip|*.csv;*.tsv;*.csv.gz;*.tsv.gz|アクセスログ|*.log;*.log.gz;*.jsonl;*.jsonl.gz;*.ndjson;*.ndjson.gz|Excelブック|*.xlsx|すべてのファイル|*.*", Multiselect = true };
         if (dialog.ShowDialog(this) == DialogResult.OK) await OpenFilesAsync(dialog.FileNames);
     }
 
@@ -203,7 +217,7 @@ internal sealed partial class MainForm : Form
     {
         if (_busy) return;
         var options = DefaultReadOptions();
-        if (Settings.ConfirmReadSettings)
+        if (Settings.ConfirmReadSettings && paths.Any(path => !IsAccessLog(path)))
         {
             if (paths.All(IsXlsx))
             {
@@ -215,6 +229,7 @@ internal sealed partial class MainForm : Form
         }
         foreach (var path in paths)
         {
+            if (IsAccessLog(path)) { if(!await OpenAccessLogAsync(path)) break; continue; }
             if (IsXlsx(path))
             {
                 IReadOnlyList<CsvDocument>? sheets = null;
@@ -249,9 +264,10 @@ internal sealed partial class MainForm : Form
     {
         if (Current is not { } p) return; p.Grid.EndEdit();
         var filename = string.Concat(p.Document.DisplayName.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+        if(p.Document.ImportSourcePath is not null && p.Document.SourcePath is null)filename=Path.GetFileNameWithoutExtension(filename.EndsWith(".gz",StringComparison.OrdinalIgnoreCase)?Path.GetFileNameWithoutExtension(filename):filename)+".csv";
         if (!filtered && p.Document.WorkbookSourcePath is { } bookPath) filename = Path.GetFileName(bookPath);
         if (IsXlsx(filename)) filename = Path.GetFileNameWithoutExtension(filename) + "-values.xlsx";
-        using var dialog = new SaveFileDialog { Filter = "CSV|*.csv|Excelブック|*.xlsx|TSV|*.tsv|すべてのファイル|*.*", FileName = string.IsNullOrWhiteSpace(filename) ? "new.csv" : filename, FilterIndex = IsXlsx(filename) ? 2 : 1, DefaultExt = IsXlsx(filename) ? "xlsx" : "csv", OverwritePrompt = true };
+        using var dialog = new SaveFileDialog { Filter = "CSV|*.csv|Excelブック|*.xlsx|TSV|*.tsv|gzip CSV|*.csv.gz|すべてのファイル|*.*", FileName = string.IsNullOrWhiteSpace(filename) ? "new.csv" : filename, FilterIndex = IsXlsx(filename) ? 2 : 1, DefaultExt = IsXlsx(filename) ? "xlsx" : "csv", OverwritePrompt = true };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         if (IsXlsx(dialog.FileName))
         {
@@ -407,26 +423,10 @@ internal sealed partial class MainForm : Form
         if (Current is { } p) { using var f = new FindForm(this, p); f.ShowDialog(this); } return Task.CompletedTask;
     }
 
-    private async Task StatsAsync()
+    private Task StatsAsync()
     {
-        if (Current is not { } p || p.Document.Columns.Count == 0) return;
-        var scope = Dialogs.Choice(this, "統計の対象", "選択範囲は選択した行 × 選択した列です", new[] { StatsScope.Selection, StatsScope.CurrentView },
-            display: s => s == StatsScope.Selection ? "選択範囲" : "現在のフィルター結果の全行・全列");
-        if (scope is null) return;
-        var selection = p.Selection(); var columns = scope == StatsScope.Selection ? selection.Columns : Enumerable.Range(0, p.Document.Columns.Count).ToArray();
-        var selectedIds = scope == StatsScope.Selection ? p.SelectedRowIds() : null;
-        var results = new List<(string Column, StatisticsResult Result)>();
-        if (!await RunWork("統計を計算", token =>
-        {
-            var analysis = new AnalysisService(Workspace);
-            foreach (var col in columns) results.Add((p.Document.Columns[col].HeaderName, scope == StatsScope.Selection
-                ? analysis.StatsForRows(p.Document, selectedIds!, col, token) : analysis.Stats(p.Document, p.View, col, token: token)));
-        })) return;
-        using var f = new Form { Text = "統計 — " + p.Document.DisplayName, Width = 850, Height = 650, StartPosition = FormStartPosition.CenterParent, Font = Font };
-        var grid = new DataGridView { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill };
-        grid.Columns.Add("column", "列"); grid.Columns.Add("metric", "統計"); grid.Columns.Add("value", "値");
-        foreach (var result in results) foreach (var item in result.Result.Items) grid.Rows.Add(result.Column, item.Key, item.Value);
-        f.Controls.Add(grid); UiTheme.ThemeForm(f); f.ShowDialog(this);
+        OpenLogAnalysis("stats");
+        return Task.CompletedTask;
     }
 
     private async Task DecodeAsync()
@@ -446,13 +446,37 @@ internal sealed partial class MainForm : Form
                 preview = Workspace.PreviewDecode(p.Document, scope, selection.Columns, kind, encoding, plus, token);
             })) return;
             if (!ConfirmBulkChange("デコード", preview!, string.Join(", ", selection.Columns.Select(c => p.Document.Columns[c].HeaderName)))) return;
-            if (await RunWork("デコード", token => { using var undo = Workspace.BeginUndo(p.Document, "デコード"); count = new DecodeService(Workspace).Apply(p.Document, scope!, selection.Columns, kind, encoding, plus, token); undo.Complete(); }))
-            { await p.ReloadAsync(); _state.Text = $"{count:N0}セルをデコードしました"; }
+            var committed = false;
+            p.InvalidateDisplayedRows();
+            try
+            {
+                await RunWork("デコード", token =>
+                {
+                    using (var undo = Workspace.BeginUndo(p.Document, "デコード"))
+                    {
+                        count = new DecodeService(Workspace).Apply(p.Document, scope!, selection.Columns, kind, encoding, plus, token);
+                        undo.Complete();
+                    }
+                    committed = true;
+                });
+            }
+            finally
+            {
+                // A committed transformation must synchronize its page even after a late cancel.
+                // If reading fails, the invalidated cache stays empty and cannot be edited.
+                if (!IsDisposed && !Disposing && !p.IsDisposed && !p.Disposing)
+                {
+                    p.UpdateTitle();
+                    var refreshed = await p.ReloadAsync(canCancel: false);
+                    _state.Text = committed
+                        ? refreshed ? $"{count:N0}セルをデコードしました" : $"{count:N0}セルのデコードは完了しました。表示の更新が必要です。"
+                        : "デコード処理を終了しました。" + (refreshed ? "" : "表示の更新が必要です。");
+                }
+            }
         }
         finally { scope?.Dispose(); }
     }
 
-    private enum StatsScope { Selection, CurrentView }
     private void OpenSql() => ShowSql(Settings.SqlLayout);
     internal void UpdateInspector()
     {
